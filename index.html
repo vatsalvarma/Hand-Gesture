@@ -1,0 +1,568 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prizmabrixx - Gesture Controlled Globe</title>
+    <style>
+        * { box-sizing: border-box; }
+        
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background-color: #030508; color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden; /* No scrolling needed for gesture UI */
+        }
+
+        #webgl-container {
+            position: fixed; top: 0; left: 0;
+            width: 100vw; height: 100vh; z-index: 0;
+        }
+
+        /* UI Overlays */
+        nav {
+            position: fixed; top: 40px; right: 40px; z-index: 100;
+        }
+
+        .nav-pill {
+            background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 30px; padding: 10px 30px; display: flex; gap: 20px;
+            backdrop-filter: blur(10px); font-size: 12px; letter-spacing: 2px;
+        }
+
+        .ui-text {
+            position: absolute; left: 5vw; top: 50%; transform: translateY(-50%); z-index: 100;
+            pointer-events: none;
+        }
+        
+        .ui-text h2 { font-size: 14px; letter-spacing: 2px; margin-bottom: 20px; font-weight: normal; }
+        .ui-list { list-style: none; padding: 0; margin: 0; }
+        .ui-list li { margin-bottom: 15px; font-size: 12px; letter-spacing: 2px; color: rgba(255,255,255,0.6); }
+        .ui-list li span { color: #00f2fe; }
+
+        .cam-status {
+            position: fixed; bottom: 80px; left: 20px; font-size: 12px; color: #00ff88; z-index: 100;
+        }
+
+        .hand-canvas {
+            position: fixed; bottom: 20px; right: 20px; width: 240px; height: 180px;
+            background-color: rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 12px; z-index: 1000; pointer-events: none;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+
+        .title-overlay {
+            position: fixed; bottom: 40px; width: 100%; text-align: center;
+            font-size: 3vw; font-weight: 800; letter-spacing: 15px; text-transform: uppercase;
+            background: linear-gradient(to right, #00f2fe 0%, #4facfe 50%, #00f2fe 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            filter: drop-shadow(0 0 20px rgba(0, 242, 254, 0.5));
+            z-index: 10; pointer-events: none;
+        }
+
+        /* Mode Toggles */
+        .mode-toggles {
+            position: fixed; bottom: 30px; left: 30px; z-index: 100;
+            display: flex; gap: 10px;
+        }
+
+        .mode-btn {
+            background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 20px; padding: 12px 24px; color: rgba(255,255,255,0.6);
+            font-family: inherit; font-size: 12px; font-weight: bold; cursor: pointer; transition: 0.3s;
+            letter-spacing: 2px;
+        }
+
+        .mode-btn:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+        .mode-btn.active { background: rgba(0, 242, 254, 0.2); border-color: #00f2fe; color: #fff; box-shadow: 0 0 10px rgba(0, 242, 254, 0.3); }
+
+    </style>
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <nav>
+        <div class="nav-pill">
+            <span>WORK</span>
+            <span style="width: 30px; height: 1px; background: rgba(255,255,255,0.5); margin: auto 0;"></span>
+            <span>CONTACT</span>
+        </div>
+    </nav>
+
+    <div class="ui-text">
+        <h2>GESTURE CONTROLS</h2>
+        <ul class="ui-list">
+            <li><span>[FIST]</span> FORM GLOBE / BUILD HOUSE</li>
+            <li><span>[OPEN HAND]</span> EXPLODE / UNBUILD</li>
+            <li><span>[GUN (2 FINGERS)]</span> 360 ROTATE VIEW</li>
+            <li><span>[PINCH]</span> ROTATE CARDS</li>
+        </ul>
+    </div>
+    
+    <div class="cam-status" id="cam-status">Initializing Camera & Hand Tracking...</div>
+    <div class="title-overlay">PRIZMABRIXX</div>
+    <canvas class="hand-canvas" id="hand-canvas" width="480" height="360"></canvas>
+
+    <div class="mode-toggles">
+        <button id="btn-particles" class="mode-btn active">PARTICLES</button>
+        <button id="btn-lines" class="mode-btn">LINES</button>
+    </div>
+
+    <div id="webgl-container"></div>
+
+    <script>
+        window.addEventListener('load', () => {
+            // --------------------------------------------------------
+            // 1. Setup Three.js Scene
+            // --------------------------------------------------------
+            const container = document.getElementById('webgl-container');
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x030508);
+            scene.fog = new THREE.FogExp2(0x030508, 0.02);
+
+            const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 25;
+
+            const renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+            dirLight.position.set(10, 20, 10);
+            scene.add(dirLight);
+
+            // --------------------------------------------------------
+            // 2. The Globe (Particles)
+            // --------------------------------------------------------
+            const globeGroup = new THREE.Group();
+            scene.add(globeGroup);
+
+            // Inner solid glowing core
+            const coreGeo = new THREE.SphereGeometry(3.8, 32, 32);
+            const coreMat = new THREE.MeshStandardMaterial({
+                color: 0x0022ff, emissive: 0x001188, transparent: true, opacity: 0.8, roughness: 0.1
+            });
+            const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+            globeGroup.add(coreMesh);
+
+            // Particle Shell
+            const pCount = 8000;
+            const pGeo = new THREE.BufferGeometry();
+            const pPos = new Float32Array(pCount * 3);
+            const pBase = new Float32Array(pCount * 3);
+            const pVel = new Float32Array(pCount * 3);
+            const globeRadius = 4.2;
+
+            for(let i=0; i<pCount; i++) {
+                const u = Math.random();
+                const v = Math.random();
+                const theta = u * 2.0 * Math.PI;
+                const phi = Math.acos(2.0 * v - 1.0);
+                
+                const x = globeRadius * Math.sin(phi) * Math.cos(theta);
+                const y = globeRadius * Math.sin(phi) * Math.sin(theta);
+                const z = globeRadius * Math.cos(phi);
+                
+                pBase[i*3] = x; pBase[i*3+1] = y; pBase[i*3+2] = z;
+                pPos[i*3] = x; pPos[i*3+1] = y; pPos[i*3+2] = z;
+                
+                // Random explosion velocity
+                pVel[i*3] = (x / globeRadius) * (Math.random() * 20 + 5);
+                pVel[i*3+1] = (y / globeRadius) * (Math.random() * 20 + 5);
+                pVel[i*3+2] = (z / globeRadius) * (Math.random() * 20 + 5);
+            }
+            pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+
+            const ptCanvas = document.createElement('canvas');
+            ptCanvas.width = 32; ptCanvas.height = 32;
+            const ptCtx = ptCanvas.getContext('2d');
+            const grad = ptCtx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, '#00f2fe'); grad.addColorStop(1, 'transparent');
+            ptCtx.fillStyle = grad; ptCtx.fillRect(0,0,32,32);
+            const ptTex = new THREE.CanvasTexture(ptCanvas);
+
+            const pMat = new THREE.PointsMaterial({
+                size: 0.2, map: ptTex, transparent: true, opacity: 0.9,
+                blending: THREE.AdditiveBlending, depthWrite: false, color: 0x00f2fe
+            });
+            const globeParticles = new THREE.Points(pGeo, pMat);
+            globeGroup.add(globeParticles);
+
+            // --------------------------------------------------------
+            // 3. The Blueprint House (Lines) - Modern Architecture
+            // --------------------------------------------------------
+            const houseGroup = new THREE.Group();
+            scene.add(houseGroup);
+            houseGroup.visible = false; // Hidden by default
+
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x4facfe, linewidth: 2, transparent: true, opacity: 1.0 });
+            const faceMat = new THREE.MeshBasicMaterial({ color: 0x0044aa, transparent: true, opacity: 0.15, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending });
+            
+            const meshes = []; // Store meshes to animate drawRange
+            const faces = [];
+
+            function addHousePart(geo, x, y, z, rotY = 0) {
+                // Add faintly glowing faces
+                const faceMesh = new THREE.Mesh(geo, faceMat);
+                faceMesh.position.set(x, y, z);
+                faceMesh.rotation.y = rotY;
+                houseGroup.add(faceMesh);
+                faces.push(faceMesh);
+
+                // Add wireframe (low threshold to ensure grid structural lines are drawn)
+                const edgeGeo = new THREE.EdgesGeometry(geo, 1);
+                const edgeMesh = new THREE.LineSegments(edgeGeo, lineMat);
+                edgeMesh.position.set(x, y, z);
+                edgeMesh.rotation.y = rotY;
+                houseGroup.add(edgeMesh);
+                meshes.push(edgeMesh);
+            }
+
+            // Ground Grid
+            const gridGeo = new THREE.GridHelper(50, 50, 0x00aaff, 0x0033aa);
+            gridGeo.position.y = -5;
+            gridGeo.material.transparent = true;
+            gridGeo.material.opacity = 0.6;
+            houseGroup.add(gridGeo);
+
+            // Floating Annotation Lines / Structural Projections
+            const extraLinesGeo = new THREE.BufferGeometry();
+            const elPts = [];
+            for(let i=0; i<15; i++) {
+                const rx = (Math.random() - 0.5) * 40;
+                const ry = (Math.random() - 0.5) * 15;
+                const rz = (Math.random() - 0.5) * 40;
+                elPts.push(new THREE.Vector3(rx, ry, rz));
+                elPts.push(new THREE.Vector3(rx + (Math.random()*10), ry, rz));
+            }
+            extraLinesGeo.setFromPoints(elPts);
+            const extraLinesMesh = new THREE.LineSegments(extraLinesGeo, new THREE.LineBasicMaterial({color: 0x00f2fe, transparent: true, opacity: 0.4}));
+            houseGroup.add(extraLinesMesh);
+            meshes.push(extraLinesMesh); // Will also animate with drawRange!
+
+            // --- MODERN ARCHITECTURE GEOMETRY ---
+            
+            // Core Base Structure
+            addHousePart(new THREE.BoxGeometry(10, 6, 8, 4, 3, 3), 0, -2, 0);
+            
+            // Cantilevered Upper Box (Extending aggressively forward)
+            addHousePart(new THREE.BoxGeometry(12, 5, 10, 5, 2, 4), 1, 3.5, 3);
+            
+            // Side Vertical Core (Elevator shaft / Structural spine)
+            addHousePart(new THREE.BoxGeometry(4, 14, 5, 2, 6, 2), -5, 2, -2);
+            
+            // Lower Deck / Pool/Patio area
+            addHousePart(new THREE.BoxGeometry(16, 0.5, 12, 6, 1, 4), -2, -4.75, 7);
+            
+            // Flat Overhanging Roof on upper box
+            addHousePart(new THREE.BoxGeometry(14, 0.5, 12, 5, 1, 4), 1, 6.25, 3);
+            
+            // Structural Pillars supporting the Cantilever
+            addHousePart(new THREE.CylinderGeometry(0.2, 0.2, 8, 8), 5, -1, 7);
+            addHousePart(new THREE.CylinderGeometry(0.2, 0.2, 8, 8), -3, -1, 7);
+
+            // Modern Window Grids (Using dense segments to simulate glass curtain walls)
+            addHousePart(new THREE.BoxGeometry(8, 4, 0.1, 8, 4, 1), 1, 3.5, 8.05); // Front upper glass wall
+            addHousePart(new THREE.BoxGeometry(0.1, 5, 6, 1, 5, 6), 5.05, -2, 2); // Side lower glass wall
+
+            // --------------------------------------------------------
+            // 4. Glass Cards rotating around Globe
+            // --------------------------------------------------------
+            const cardsGroup = new THREE.Group();
+            scene.add(cardsGroup);
+
+            const numCards = 5;
+            function createCardTexture(title, subtitle) {
+                const canvas = document.createElement('canvas');
+                canvas.width = 512; canvas.height = 320;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = 'rgba(10, 10, 15, 0.8)'; ctx.fillRect(0, 0, 512, 320);
+                
+                const b1 = ctx.createRadialGradient(100, 100, 0, 100, 100, 200);
+                b1.addColorStop(0, 'rgba(255, 50, 100, 0.3)'); b1.addColorStop(1, 'transparent');
+                ctx.fillStyle = b1; ctx.fillRect(0, 0, 512, 320);
+
+                ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.font = '16px "Courier New"'; ctx.fillText(subtitle, 256, 140);
+                ctx.font = 'bold 36px "Courier New"'; ctx.fillText(title, 256, 180);
+                return new THREE.CanvasTexture(canvas);
+            }
+
+            const cardData = [
+                { title: "KANDINSKY", sub: "Google" },
+                { title: "WELCOME TO HOGWARTS", sub: "Harry Potter" },
+                { title: "THE LAB", sub: "Innovation" },
+                { title: "AI ENGINE", sub: "Neural Net" },
+                { title: "METAVERSE", sub: "Web 3.0" }
+            ];
+
+            const cards = [];
+            for(let i=0; i<numCards; i++) {
+                const mat = new THREE.MeshStandardMaterial({
+                    map: createCardTexture(cardData[i].title, cardData[i].sub),
+                    transparent: true, opacity: 0.85, roughness: 0.1, metalness: 0.5, side: THREE.DoubleSide
+                });
+                const card = new THREE.Mesh(new THREE.PlaneGeometry(5, 3.1), mat);
+                const angle = (i / numCards) * Math.PI * 2;
+                const radius = 10;
+                card.position.set(Math.cos(angle) * radius, (Math.random() - 0.5) * 4, Math.sin(angle) * radius);
+                card.rotation.y = -angle + Math.PI/2;
+                cardsGroup.add(card);
+                cards.push({ mesh: card, angle: angle, radius: radius, yOffset: card.position.y });
+            }
+
+            // --------------------------------------------------------
+            // 5. UI Toggles
+            // --------------------------------------------------------
+            let currentMode = 'particles';
+
+            document.getElementById('btn-particles').addEventListener('click', (e) => {
+                currentMode = 'particles';
+                e.target.classList.add('active');
+                document.getElementById('btn-lines').classList.remove('active');
+                globeGroup.visible = true;
+                cardsGroup.visible = true; // Show cards with particles
+                houseGroup.visible = false;
+            });
+
+            document.getElementById('btn-lines').addEventListener('click', (e) => {
+                currentMode = 'lines';
+                e.target.classList.add('active');
+                document.getElementById('btn-particles').classList.remove('active');
+                globeGroup.visible = false;
+                cardsGroup.visible = false; // Hide cards to focus on building
+                houseGroup.visible = true;
+            });
+
+            // --------------------------------------------------------
+            // 6. Gesture & Animation State
+            // --------------------------------------------------------
+            let explodeTarget = 0; // 0 = Globe, 1 = Explode
+            let explodeCurrent = 0;
+            
+            let houseBuildTarget = 1.0; // 1 = Built, 0 = Unbuilt
+            let houseBuildCurrent = 1.0;
+
+            let cardsBaseRotation = 0;
+            let cardsTargetSpeed = 0.01;
+            let cardsCurrentSpeed = 0.01;
+
+            let sceneRotationTargetSpeed = 0;
+            let sceneRotationCurrentSpeed = 0;
+            let sceneRotation = 0;
+
+            const handCanvas = document.getElementById('hand-canvas');
+            const handCtx = handCanvas.getContext('2d');
+
+            function dist(p1, p2) { return Math.hypot(p1.x - p2.x, p1.y - p2.y); }
+
+            function onResults(results) {
+                handCtx.save();
+                handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+                
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    const landmarks = results.multiHandLandmarks[0];
+                    
+                    // Draw Hand Skeleton perfectly inside the 2D canvas box
+                    drawConnectors(handCtx, landmarks, HAND_CONNECTIONS, {color: '#ffffff', lineWidth: 2}); // White lines
+                    drawLandmarks(handCtx, landmarks, {color: '#ff0000', fillColor: '#ffff00', lineWidth: 2, radius: 4}); // Red border, Yellow fill
+
+                    // Gesture Logic
+                    const dIndexTip = dist(landmarks[0], landmarks[8]);
+                    const dIndexMCP = dist(landmarks[0], landmarks[5]);
+                    const dMiddleTip = dist(landmarks[0], landmarks[12]);
+                    const dMiddleMCP = dist(landmarks[0], landmarks[9]);
+                    const dPinkyTip = dist(landmarks[0], landmarks[20]);
+                    const dPinkyMCP = dist(landmarks[0], landmarks[17]);
+                    
+                    const isFist = dIndexTip < dIndexMCP && dMiddleTip < dMiddleMCP && dPinkyTip < dPinkyMCP;
+                    const isOpen = dIndexTip > dIndexMCP * 1.5 && dMiddleTip > dMiddleMCP * 1.5 && dPinkyTip > dPinkyMCP * 1.5;
+                    const isGun = dIndexTip > dIndexMCP * 1.2 && dMiddleTip < dMiddleMCP && dPinkyTip < dPinkyMCP && dist(landmarks[4], landmarks[5]) > 0.05 && !isFist;
+                    const isPinch = dist(landmarks[4], landmarks[8]) < 0.05 && !isFist && !isGun;
+
+                    if (isGun) {
+                        // 2 Fingers Gun: 360 Rotate View
+                        const handX = landmarks[8].x - 0.5; // -0.5 to 0.5
+                        sceneRotationTargetSpeed = -handX * 0.15;
+                    } else {
+                        sceneRotationTargetSpeed = 0;
+                    }
+
+                    if (isFist) {
+                        explodeTarget = 0; // Form globe
+                        houseBuildTarget = 1.0; // Build House
+                        cardsTargetSpeed = 0.01;
+                    } else if (isOpen) {
+                        explodeTarget = 1; // Explode globe
+                        houseBuildTarget = 0.0; // Unbuild/Explode House
+                        cardsTargetSpeed = 0.05; // Cards spin faster
+                    } else if (isPinch) {
+                        const handX = landmarks[8].x - 0.5;
+                        cardsTargetSpeed = -handX * 0.2; // Rotate cards based on hand
+                    }
+
+                } else {
+                    // Defaults when no hand detected
+                    explodeTarget = 0;
+                    houseBuildTarget = 1.0;
+                    cardsTargetSpeed = 0.01;
+                    sceneRotationTargetSpeed = 0;
+                }
+                handCtx.restore();
+            }
+
+            // --------------------------------------------------------
+            // 7. Start MediaPipe Camera
+            // --------------------------------------------------------
+            const videoElement = document.createElement('video');
+            videoElement.style.display = 'none';
+            document.body.appendChild(videoElement);
+
+            const hands = new Hands({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }});
+            hands.setOptions({
+                maxNumHands: 1, modelComplexity: 1,
+                minDetectionConfidence: 0.5, minTrackingConfidence: 0.5
+            });
+            hands.onResults(onResults);
+
+            const cam = new Camera(videoElement, {
+                onFrame: async () => { await hands.send({image: videoElement}); },
+                width: 640, height: 480
+            });
+            
+            cam.start().then(() => {
+                document.getElementById('cam-status').innerText = "Hand Tracking Active!";
+                setTimeout(() => document.getElementById('cam-status').style.display='none', 3000);
+            }).catch(err => {
+                document.getElementById('cam-status').innerText = "Camera access denied. Please allow camera and use local server.";
+            });
+
+            // --------------------------------------------------------
+            // 8. Render Loop
+            // --------------------------------------------------------
+            const clock = new THREE.Clock();
+            function animate() {
+                const time = clock.getElapsedTime();
+
+                // 360 Rotation from Gun Gesture
+                sceneRotationCurrentSpeed += (sceneRotationTargetSpeed - sceneRotationCurrentSpeed) * 0.1;
+                sceneRotation += sceneRotationCurrentSpeed;
+
+                // Mode: Particles
+                if (currentMode === 'particles') {
+                    explodeCurrent += (explodeTarget - explodeCurrent) * 0.05;
+                    coreMesh.material.opacity = 0.8 * (1 - explodeCurrent);
+                    coreMesh.scale.setScalar(1 + explodeCurrent * 0.5);
+
+                    const pos = pGeo.attributes.position.array;
+                    for(let i=0; i<pCount; i++) {
+                        const bx = pBase[i*3]; const by = pBase[i*3+1]; const bz = pBase[i*3+2];
+                        const vx = pVel[i*3]; const vy = pVel[i*3+1]; const vz = pVel[i*3+2];
+                        
+                        const tx = bx + vx * explodeCurrent * 2;
+                        const ty = by + vy * explodeCurrent * 2;
+                        const tz = bz + vz * explodeCurrent * 2;
+                        
+                        pos[i*3] = tx + Math.sin(time + by) * 0.1;
+                        pos[i*3+1] = ty + Math.cos(time + bx) * 0.1;
+                        pos[i*3+2] = tz + Math.sin(time + bz) * 0.1;
+                    }
+                    pGeo.attributes.position.needsUpdate = true;
+                    globeGroup.rotation.y = time * 0.1 + sceneRotation;
+                    globeGroup.rotation.z = Math.sin(time * 0.2) * 0.1;
+
+                    // Cards
+                    cardsCurrentSpeed += (cardsTargetSpeed - cardsCurrentSpeed) * 0.1;
+                    cardsBaseRotation += cardsCurrentSpeed;
+                    cardsGroup.rotation.y = cardsBaseRotation + sceneRotation;
+
+                    cards.forEach((c) => {
+                        c.mesh.position.y = c.yOffset + Math.sin(time * 2 + c.angle) * 0.5;
+                        c.mesh.rotation.y = -cardsGroup.rotation.y - c.angle + Math.PI/2;
+                    });
+                }
+                
+                // Mode: Lines (Blueprint House)
+                if (currentMode === 'lines') {
+                    houseGroup.rotation.y = sceneRotation; // Apply 360 rotation
+                    
+                    houseBuildCurrent += (houseBuildTarget - houseBuildCurrent) * 0.05;
+                    
+                    // Animate the drawing of the wireframe lines based on build progress
+                    meshes.forEach(mesh => {
+                        const totalVerts = mesh.geometry.attributes.position.count;
+                        mesh.geometry.setDrawRange(0, Math.floor(houseBuildCurrent * totalVerts));
+                    });
+
+                    // Animate inner glowing faces and floor grid opacity
+                    faces.forEach(f => {
+                        f.material.opacity = 0.15 * houseBuildCurrent;
+                    });
+                    gridGeo.material.opacity = 0.5 * houseBuildCurrent;
+                }
+
+                renderer.render(scene, camera);
+                requestAnimationFrame(animate);
+            }
+            animate();
+
+            // Resize
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        });
+    </script>
+<!-- Code injected by live-server -->
+<script>
+	// <![CDATA[  <-- For SVG support
+	if ('WebSocket' in window) {
+		(function () {
+			function refreshCSS() {
+				var sheets = [].slice.call(document.getElementsByTagName("link"));
+				var head = document.getElementsByTagName("head")[0];
+				for (var i = 0; i < sheets.length; ++i) {
+					var elem = sheets[i];
+					var parent = elem.parentElement || head;
+					parent.removeChild(elem);
+					var rel = elem.rel;
+					if (elem.href && typeof rel != "string" || rel.length == 0 || rel.toLowerCase() == "stylesheet") {
+						var url = elem.href.replace(/(&|\?)_cacheOverride=\d+/, '');
+						elem.href = url + (url.indexOf('?') >= 0 ? '&' : '?') + '_cacheOverride=' + (new Date().valueOf());
+					}
+					parent.appendChild(elem);
+				}
+			}
+			var protocol = window.location.protocol === 'http:' ? 'ws://' : 'wss://';
+			var address = protocol + window.location.host + window.location.pathname + '/ws';
+			var socket = new WebSocket(address);
+			socket.onmessage = function (msg) {
+				if (msg.data == 'reload') window.location.reload();
+				else if (msg.data == 'refreshcss') refreshCSS();
+			};
+			if (sessionStorage && !sessionStorage.getItem('IsThisFirstTime_Log_From_LiveServer')) {
+				console.log('Live reload enabled.');
+				sessionStorage.setItem('IsThisFirstTime_Log_From_LiveServer', true);
+			}
+		})();
+	}
+	else {
+		console.error('Upgrade your browser. This Browser is NOT supported WebSocket for Live-Reloading.');
+	}
+	// ]]>
+</script>
+</body>
+</html>
